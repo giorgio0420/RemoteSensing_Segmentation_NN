@@ -64,16 +64,19 @@ def main(args):
     train_subset = Config.TRAIN_SUBSET_SIZE if args.train_subset is None else args.train_subset
     val_subset = Config.VAL_SUBSET_SIZE if args.val_subset is None else args.val_subset
     tag = args.tag or f"{mode}_n{train_subset or 'full'}"
+    # --wavelet / --no-wavelet sovrascrivono Config; se non passati usa il default di Config
+    use_wave = Config.USE_WAVELET_AUGMENTATION if args.wavelet is None else args.wavelet
 
     print("=" * 70)
     print(f"RUN: {tag} | pretraining={mode} | train_subset={train_subset} | epochs={epochs}")
-    print(f"Device: {Config.DEVICE} | Wavelet: {Config.USE_WAVELET_AUGMENTATION} | "
+    print(f"Device: {Config.DEVICE} | Wavelet: {use_wave} | "
           f"ignore_index={Config.IGNORE_INDEX} | ImageNetNorm={Config.USE_IMAGENET_NORM}")
     print("=" * 70)
 
     # ---------- Data ----------
-    train_tf = get_train_transforms(Config.IMAGE_SIZE, use_wavelet=Config.USE_WAVELET_AUGMENTATION)
-    val_tf = get_val_transforms(Config.IMAGE_SIZE, use_wavelet=Config.USE_WAVELET_AUGMENTATION)
+    # Wavelet applicata in modo COERENTE a train E val (niente mismatch di dominio)
+    train_tf = get_train_transforms(Config.IMAGE_SIZE, use_wavelet=use_wave)
+    val_tf = get_val_transforms(Config.IMAGE_SIZE, use_wavelet=use_wave)
     train_ds = make_loader("train", train_tf, train_subset)
     val_ds = make_loader("val", val_tf, val_subset)
 
@@ -183,5 +186,9 @@ if __name__ == "__main__":
     p.add_argument("--val-subset", dest="val_subset", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--tag", type=str, default=None, help="nome del run nei file di output")
+    p.add_argument("--wavelet", dest="wavelet", action="store_true", default=None,
+                   help="forza wavelet ISPAMM ON (override Config)")
+    p.add_argument("--no-wavelet", dest="wavelet", action="store_false",
+                   help="forza wavelet ISPAMM OFF (override Config)")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

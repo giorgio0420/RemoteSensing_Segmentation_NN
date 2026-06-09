@@ -37,10 +37,10 @@ def build_model(mode):
 
 class CombinedLoss(nn.Module):
     """CrossEntropy + Dice, entrambe con ignore_index per scartare il 'no-data'."""
-    def __init__(self, ignore_index=-100):
+    def __init__(self, ignore_index=-100, weight=None):
         super().__init__()
         import segmentation_models_pytorch as smp
-        self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.ce = nn.CrossEntropyLoss(ignore_index=ignore_index, weight=weight)
         ign = ignore_index if ignore_index >= 0 else None
         self.dice = smp.losses.DiceLoss(mode='multiclass', ignore_index=ign)
 
@@ -66,31 +66,38 @@ def main(args):
     tag = args.tag or f"{mode}_n{train_subset or 'full'}"
     # --wavelet / --no-wavelet sovrascrivono Config; se non passati usa il default di Config
     use_wave = Config.USE_WAVELET_AUGMENTATION if args.wavelet is None else args.wavelet
+    img_size = args.img_size or Config.IMAGE_SIZE      # risoluzione (224 default, 448 per test ad alta ris)
+    batch_size = args.batch_size or Config.BATCH_SIZE  # abbassa con img_size grande (es. 8 @ 448)
 
     print("=" * 70)
     print(f"RUN: {tag} | pretraining={mode} | train_subset={train_subset} | epochs={epochs}")
-    print(f"Device: {Config.DEVICE} | Wavelet: {use_wave} | "
-          f"ignore_index={Config.IGNORE_INDEX} | ImageNetNorm={Config.USE_IMAGENET_NORM}")
+    print(f"Device: {Config.DEVICE} | img_size={img_size} | batch={batch_size} | Wavelet: {use_wave} | "
+          f"class_weights={args.class_weights} | ignore_index={Config.IGNORE_INDEX}")
     print("=" * 70)
 
     # ---------- Data ----------
     # Wavelet applicata in modo COERENTE a train E val (niente mismatch di dominio)
-    train_tf = get_train_transforms(Config.IMAGE_SIZE, use_wavelet=use_wave)
-    val_tf = get_val_transforms(Config.IMAGE_SIZE, use_wavelet=use_wave)
+    train_tf = get_train_transforms(img_size, use_wavelet=use_wave)
+    val_tf = get_val_transforms(img_size, use_wavelet=use_wave)
     train_ds = make_loader("train", train_tf, train_subset)
     val_ds = make_loader("val", val_tf, val_subset)
 
     nw = Config.NUM_WORKERS
-    train_loader = DataLoader(train_ds, batch_size=Config.BATCH_SIZE, shuffle=True, num_workers=nw,
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=nw,
                               pin_memory=True, persistent_workers=(nw > 0))
-    val_loader = DataLoader(val_ds, batch_size=Config.BATCH_SIZE, shuffle=False, num_workers=nw,
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=nw,
                             pin_memory=True, persistent_workers=(nw > 0))
     print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
 
     # ---------- Model / loss / optim ----------
     model, encoder_params = build_model(mode)
     model = model.to(Config.DEVICE)
-    criterion = CombinedLoss(ignore_index=Config.IGNORE_INDEX)
+    # Pesi-classe (median-frequency): danno piu' importanza alle classi rare (road/water/building)
+    cw = None
+    if args.class_weights and getattr(Config, "CLASS_WEIGHTS", None) is not None:
+        cw = torch.tensor(Config.CLASS_WEIGHTS, dtype=torch.float32, device=Config.DEVICE)
+        print(f"Class-weighting ATTIVO: {Config.CLASS_WEIGHTS}")
+    criterion = CombinedLoss(ignore_index=Config.IGNORE_INDEX, weight=cw)
 
     # Warmup con encoder congelato ha senso solo se l'encoder e' PRETRAINED ed esiste
     do_warmup = (mode in ("imagenet", "rsp")) and Config.FREEZE_EPOCHS > 0 and encoder_params is not None
@@ -111,8 +118,9 @@ def main(args):
     train_losses, val_losses = [], []
     best_miou = -1.0
     hist_path = f"history_{tag}.csv"
+    cls_cols = [f"IoU_{Config.CLASS_NAMES[c]}" for c in range(Config.NUM_CLASSES) if c != Config.IGNORE_INDEX]
     with open(hist_path, "w", newline="") as f:
-        csv.writer(f).writerow(["epoch", "train_loss", "val_loss", "pixel_acc", "mIoU", "Dice"])
+        csv.writer(f).writerow(["epoch", "train_loss", "val_loss", "pixel_acc", "mIoU", "Dice"] + cls_cols)
 
     for epoch in range(epochs):
         if do_warmup and epoch == Config.FREEZE_EPOCHS:
@@ -145,9 +153,10 @@ def main(args):
             for c in range(Config.NUM_CLASSES) if c != Config.IGNORE_INDEX)
         print(f"   IoU/classe -> {per_cls}")
 
+        cls_vals = [f"{float(iou_pc[c]):.4f}" for c in range(Config.NUM_CLASSES) if c != Config.IGNORE_INDEX]
         with open(hist_path, "a", newline="") as f:
             csv.writer(f).writerow([epoch + 1, f"{train_loss:.4f}", f"{val_loss:.4f}",
-                                    f"{val_acc:.4f}", f"{val_miou:.4f}", f"{val_dice:.4f}"])
+                                    f"{val_acc:.4f}", f"{val_miou:.4f}", f"{val_dice:.4f}"] + cls_vals)
 
         plot_loss_curves(train_losses, val_losses, save_path=f"loss_{tag}.png")
 
@@ -171,8 +180,10 @@ def main(args):
     with open(summary, "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["tag", "mode", "train_subset", "epochs", "best_mIoU"])
-        w.writerow([tag, mode, train_subset or "full", epochs, f"{best_miou:.4f}"])
+            w.writerow(["tag", "mode", "train_subset", "img_size", "batch_size",
+                        "epochs", "wavelet", "class_weights", "best_mIoU"])
+        w.writerow([tag, mode, train_subset or "full", img_size, batch_size,
+                    epochs, use_wave, bool(args.class_weights), f"{best_miou:.4f}"])
     print(f"\n✔ Fine '{tag}'. Best mIoU = {best_miou:.4f} (riga aggiunta a {summary}).")
 
 
@@ -190,5 +201,11 @@ if __name__ == "__main__":
                    help="forza wavelet ISPAMM ON (override Config)")
     p.add_argument("--no-wavelet", dest="wavelet", action="store_false",
                    help="forza wavelet ISPAMM OFF (override Config)")
+    p.add_argument("--img-size", dest="img_size", type=int, default=None,
+                   help="risoluzione input (es. 224 o 448). Default: Config.IMAGE_SIZE")
+    p.add_argument("--batch-size", dest="batch_size", type=int, default=None,
+                   help="batch size (abbassa a ~8 con --img-size 448). Default: Config.BATCH_SIZE")
+    p.add_argument("--class-weights", dest="class_weights", action="store_true",
+                   help="pesa le classi rare nella loss (median-frequency balancing)")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

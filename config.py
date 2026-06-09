@@ -24,9 +24,12 @@ class Config:
     # ===================== DATASET =====================
     DATASET_NAME = "loveda"  # "loveda", "landcoverai", "deepglobe"
 
+    CLASS_WEIGHTS = None       # pesi-classe per la loss (usati solo con --class-weights). None = nessuno
     if DATASET_NAME == "loveda":
         NUM_CLASSES = 8       # le maschere hanno valori 0..7
         IGNORE_INDEX = 0      # 0 = "no-data": va ESCLUSO da loss e mIoU (convenzione ufficiale LoveDA)
+        # Median-frequency balancing (indice 0 = no-data -> peso 0). road/water/building pesano di piu'.
+        CLASS_WEIGHTS = [0.0, 0.21, 1.04, 2.29, 1.22, 1.00, 0.57, 0.30]
     elif DATASET_NAME == "landcoverai":
         NUM_CLASSES = 5
         IGNORE_INDEX = -100   # nessuna classe ignorata

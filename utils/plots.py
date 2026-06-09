@@ -30,24 +30,25 @@ def save_predictions(images, masks, logits, save_dir, epoch, batch_idx, mIoU=Non
     if batch_size == 1:
         axes = [axes]
         
+    vmax = max(masks.max(), preds.max(), 1)
     for i in range(batch_size):
-        # Original Image
+        # Original Image: ri-stesa in [0,1] perche' puo' essere normalizzata (ImageNet)
         ax_img = axes[i][0]
-        # De-normalize slightly for display if needed
-        disp_img = images[i]
+        disp_img = images[i].astype('float32')
+        disp_img = (disp_img - disp_img.min()) / (disp_img.max() - disp_img.min() + 1e-6)
         ax_img.imshow(disp_img)
         ax_img.set_title("Input Image")
         ax_img.axis('off')
-        
+
         # Ground Truth Mask
         ax_gt = axes[i][1]
-        ax_gt.imshow(masks[i], cmap='tab10', vmin=0, vmax=7, interpolation='nearest')
+        ax_gt.imshow(masks[i], cmap='tab10', vmin=0, vmax=vmax, interpolation='nearest')
         ax_gt.set_title("Ground Truth Mask")
         ax_gt.axis('off')
-        
+
         # Prediction
         ax_pred = axes[i][2]
-        ax_pred.imshow(preds[i], cmap='tab10', vmin=0, vmax=7, interpolation='nearest')
+        ax_pred.imshow(preds[i], cmap='tab10', vmin=0, vmax=vmax, interpolation='nearest')
         title_str = "Model Prediction"
         if mIoU is not None and mDice is not None:
             title_str += f"\nmIoU: {mIoU:.4f} | Dice: {mDice:.4f}"

@@ -66,13 +66,14 @@ def main(args):
     tag = args.tag or f"{mode}_n{train_subset or 'full'}"
     # --wavelet / --no-wavelet sovrascrivono Config; se non passati usa il default di Config
     use_wave = Config.USE_WAVELET_AUGMENTATION if args.wavelet is None else args.wavelet
-    img_size = args.img_size or Config.IMAGE_SIZE      # risoluzione (224 default, 448 per test ad alta ris)
-    batch_size = args.batch_size or Config.BATCH_SIZE  # abbassa con img_size grande (es. 8 @ 448)
+    use_cw = getattr(Config, "USE_CLASS_WEIGHTS", False) if args.class_weights is None else args.class_weights
+    img_size = args.img_size or Config.IMAGE_SIZE      # risoluzione (224 default)
+    batch_size = args.batch_size or Config.BATCH_SIZE  # abbassa con img_size grande
 
     print("=" * 70)
     print(f"RUN: {tag} | pretraining={mode} | train_subset={train_subset} | epochs={epochs}")
     print(f"Device: {Config.DEVICE} | img_size={img_size} | batch={batch_size} | Wavelet: {use_wave} | "
-          f"class_weights={args.class_weights} | ignore_index={Config.IGNORE_INDEX}")
+          f"class_weights={use_cw} | ignore_index={Config.IGNORE_INDEX}")
     print("=" * 70)
 
     # ---------- Data ----------
@@ -94,7 +95,7 @@ def main(args):
     model = model.to(Config.DEVICE)
     # Pesi-classe (median-frequency): danno piu' importanza alle classi rare (road/water/building)
     cw = None
-    if args.class_weights and getattr(Config, "CLASS_WEIGHTS", None) is not None:
+    if use_cw and getattr(Config, "CLASS_WEIGHTS", None) is not None:
         cw = torch.tensor(Config.CLASS_WEIGHTS, dtype=torch.float32, device=Config.DEVICE)
         print(f"Class-weighting ATTIVO: {Config.CLASS_WEIGHTS}")
     criterion = CombinedLoss(ignore_index=Config.IGNORE_INDEX, weight=cw)
@@ -183,7 +184,7 @@ def main(args):
             w.writerow(["tag", "mode", "train_subset", "img_size", "batch_size",
                         "epochs", "wavelet", "class_weights", "best_mIoU"])
         w.writerow([tag, mode, train_subset or "full", img_size, batch_size,
-                    epochs, use_wave, bool(args.class_weights), f"{best_miou:.4f}"])
+                    epochs, use_wave, bool(use_cw), f"{best_miou:.4f}"])
     print(f"\n✔ Fine '{tag}'. Best mIoU = {best_miou:.4f} (riga aggiunta a {summary}).")
 
 
@@ -205,7 +206,9 @@ if __name__ == "__main__":
                    help="risoluzione input (es. 224 o 448). Default: Config.IMAGE_SIZE")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=None,
                    help="batch size (abbassa a ~8 con --img-size 448). Default: Config.BATCH_SIZE")
-    p.add_argument("--class-weights", dest="class_weights", action="store_true",
-                   help="pesa le classi rare nella loss (median-frequency balancing)")
+    p.add_argument("--class-weights", dest="class_weights", action="store_true", default=None,
+                   help="forza class-weighting ON (override Config)")
+    p.add_argument("--no-class-weights", dest="class_weights", action="store_false",
+                   help="forza class-weighting OFF (override Config)")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

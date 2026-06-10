@@ -68,6 +68,11 @@ class Config:
     # I backbone pretrained si aspettano normalizzazione ImageNet (mean/std), non solo /255.
     USE_IMAGENET_NORM = True
 
+    # ===================== CLASS WEIGHTING =====================
+    # Pesa le classi rare nella loss (best practice su dataset sbilanciati come LoveDA).
+    # ON di default; disattivabile per-run con --no-class-weights.
+    USE_CLASS_WEIGHTS = True
+
     # ===================== HARDWARE =====================
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
     NUM_WORKERS = 2

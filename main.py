@@ -77,9 +77,13 @@ def main(args):
     print("=" * 70)
 
     # ---------- Data ----------
-    # Wavelet applicata in modo COERENTE a train E val (niente mismatch di dominio)
-    train_tf = get_train_transforms(img_size, use_wavelet=use_wave)
-    val_tf = get_val_transforms(img_size, use_wavelet=use_wave)
+    # Wavelet = augmentation non distruttiva SOLO in training (val sempre pulito)
+    w_alpha = args.wavelet_alpha if args.wavelet_alpha is not None else Config.WAVELET_ALPHA
+    w_p = args.wavelet_p if args.wavelet_p is not None else Config.WAVELET_P
+    train_tf = get_train_transforms(img_size, use_wavelet=use_wave, wavelet_alpha=w_alpha, wavelet_p=w_p)
+    val_tf = get_val_transforms(img_size, use_wavelet=False)
+    if use_wave:
+        print(f"Wavelet AUG: alpha={w_alpha} | p={w_p} (solo training, val pulito)")
     train_ds = make_loader("train", train_tf, train_subset)
     val_ds = make_loader("val", val_tf, val_subset)
 
@@ -202,6 +206,10 @@ if __name__ == "__main__":
                    help="forza wavelet ISPAMM ON (override Config)")
     p.add_argument("--no-wavelet", dest="wavelet", action="store_false",
                    help="forza wavelet ISPAMM OFF (override Config)")
+    p.add_argument("--wavelet-alpha", dest="wavelet_alpha", type=float, default=None,
+                   help="intensita' sharpening wavelet (default Config.WAVELET_ALPHA)")
+    p.add_argument("--wavelet-p", dest="wavelet_p", type=float, default=None,
+                   help="probabilita' applicazione wavelet aug (default Config.WAVELET_P)")
     p.add_argument("--img-size", dest="img_size", type=int, default=None,
                    help="risoluzione input (es. 224 o 448). Default: Config.IMAGE_SIZE")
     p.add_argument("--batch-size", dest="batch_size", type=int, default=None,

@@ -60,9 +60,12 @@ class Config:
     FREEZE_EPOCHS = 3          # epoche con encoder congelato (warmup). 0 = mai. Ignorato in "scratch"/"satmaepp".
 
     # ===================== WAVELET (ISPAMM) =====================
-    # Toggle pulito: se True viene applicato in modo COERENTE a train E val (niente piu' mismatch).
+    # Ora la wavelet e' una AUGMENTATION non distruttiva (unsharp-masking) applicata SOLO in
+    # training con probabilita' WAVELET_P e intensita' WAVELET_ALPHA. Val sempre pulito.
     USE_WAVELET_AUGMENTATION = False
     WAVELET_TYPE = 'haar'
+    WAVELET_ALPHA = 0.3        # intensita' dello sharpening (0.1=delicato, 0.5=marcato)
+    WAVELET_P = 0.5            # probabilita' di applicarla per immagine (augmentation)
 
     # ===================== NORMALIZZAZIONE =====================
     # I backbone pretrained si aspettano normalizzazione ImageNet (mean/std), non solo /255.

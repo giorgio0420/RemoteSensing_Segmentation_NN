@@ -14,6 +14,21 @@ def _up_block(in_ch, out_ch):
     )
 
 
+def _haar_detail(x):
+    """Alte frequenze (bordi) via Haar DWT 2D, dependency-free. x:[B,C,H,W] -> [B,C,H,W]."""
+    B, C, H, W = x.shape
+    filters = [
+        x.new_tensor([[0.5,  0.5], [-0.5, -0.5]]),   # LH
+        x.new_tensor([[0.5, -0.5], [0.5,  -0.5]]),   # HL
+        x.new_tensor([[0.5, -0.5], [-0.5,  0.5]]),   # HH
+    ]
+    out = 0
+    for f in filters:
+        w = f.view(1, 1, 2, 2).repeat(C, 1, 1, 1)
+        out = out + F.conv2d(x, w, stride=2, groups=C).abs()
+    return F.interpolate(out, size=(H, W), mode="bilinear", align_corners=False)
+
+
 class SatMAEppSegmenter(nn.Module):
     """
     STADIO 1 (RGB) — SatMAE++ come encoder ViT-L *CONGELATO* + decoder leggero.
@@ -32,7 +47,8 @@ class SatMAEppSegmenter(nn.Module):
     """
 
     def __init__(self, num_classes=8, ckpt_path="satmaepp_vitl_fmow.pth",
-                 img_size=224, freeze_encoder=True, pretrained=True):
+                 img_size=224, freeze_encoder=True, pretrained=True,
+                 wavelet_decoder=False, wav_ch=24):
         super().__init__()
         try:
             import timm
@@ -65,7 +81,16 @@ class SatMAEppSegmenter(nn.Module):
             _up_block(256, 128),
             _up_block(128, 64),
         )
-        self.classifier = nn.Conv2d(64, num_classes, kernel_size=1)
+        # Ramo wavelet opzionale: il ViT (patch-16) riduce l'input di 16x -> il dettaglio fine
+        # sparisce. Le alte frequenze dell'input, iniettate qui, restituiscono i bordi netti.
+        self.wavelet_decoder = wavelet_decoder
+        if wavelet_decoder:
+            self.wave = nn.Sequential(
+                nn.Conv2d(3, wav_ch, 3, padding=1), nn.BatchNorm2d(wav_ch), nn.ReLU(inplace=True),
+                nn.Conv2d(wav_ch, wav_ch, 3, padding=1), nn.BatchNorm2d(wav_ch), nn.ReLU(inplace=True),
+            )
+            print(f"[SatMAE++] Ramo WAVELET nel decoder attivo (+{wav_ch} canali di dettaglio).")
+        self.classifier = nn.Conv2d(64 + (wav_ch if wavelet_decoder else 0), num_classes, kernel_size=1)
 
     def train(self, mode=True):
         """Tiene SEMPRE l'encoder in eval (BN/dropout fermi) anche quando alleniamo il decoder."""
@@ -115,12 +140,16 @@ class SatMAEppSegmenter(nn.Module):
 
     def forward(self, x):
         H, W = x.shape[2], x.shape[3]
-        x = F.interpolate(x, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False)
+        xr = F.interpolate(x, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False)
         with torch.no_grad():
-            feats = self._forward_tokens(x)               # [B, 196, 1024]
-        B = x.shape[0]
+            feats = self._forward_tokens(xr)              # [B, 196, 1024]
+        B = xr.shape[0]
         feats = feats.transpose(1, 2).reshape(B, self.embed_dim, self.grid, self.grid)  # [B,1024,14,14]
         d = self.decoder(feats)                           # [B,64,224,224]
         if d.shape[-2:] != (H, W):
             d = F.interpolate(d, size=(H, W), mode="bilinear", align_corners=False)
+        if self.wavelet_decoder:
+            hf = _haar_detail(x)                          # bordi dell'input a piena risoluzione
+            hf = F.interpolate(hf, size=d.shape[-2:], mode="bilinear", align_corners=False)
+            d = torch.cat([d, self.wave(hf)], dim=1)
         return self.classifier(d)

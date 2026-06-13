@@ -48,7 +48,7 @@ class SatMAEppSegmenter(nn.Module):
 
     def __init__(self, num_classes=8, ckpt_path="satmaepp_vitl_fmow.pth",
                  img_size=224, freeze_encoder=True, pretrained=True,
-                 wavelet_decoder=False, wav_ch=24):
+                 wavelet_decoder=False, wav_ch=24, ft_blocks=0):
         super().__init__()
         try:
             import timm
@@ -69,10 +69,26 @@ class SatMAEppSegmenter(nn.Module):
             self.encoder_loaded = False
             print("[SatMAE++] Encoder ViT-L RANDOM (controllo: stessa rete SENZA pretraining).")
 
-        if freeze_encoder:
-            for p in self.encoder.parameters():
-                p.requires_grad = False
+        # Congela l'encoder. Se ft_blocks>0, scongela solo gli ULTIMI ft_blocks blocchi (+ norm finale):
+        # fine-tuning PARZIALE -> sta in memoria su T4 e non overfitta come il full fine-tuning.
+        for p in self.encoder.parameters():
+            p.requires_grad = False
+        self._fully_frozen = (ft_blocks == 0)
+        if ft_blocks == 0:
             self.encoder.eval()
+        else:
+            blks = list(self.encoder.blocks)
+            n = len(blks) if ft_blocks < 0 else min(ft_blocks, len(blks))
+            for blk in blks[-n:]:
+                for p in blk.parameters():
+                    p.requires_grad = True
+            for p in self.encoder.norm.parameters():
+                p.requires_grad = True
+            try:
+                self.encoder.set_grad_checkpointing(True)
+            except Exception:
+                pass
+            print(f"[SatMAE++] Fine-tuning PARZIALE: ultimi {n} blocchi del ViT scongelati (usa LR basso).")
 
         # Decoder: [B,1024,14,14] -> upsample progressivo 14->28->56->112->224
         self.decoder = nn.Sequential(
@@ -95,7 +111,7 @@ class SatMAEppSegmenter(nn.Module):
     def train(self, mode=True):
         """Tiene SEMPRE l'encoder in eval (BN/dropout fermi) anche quando alleniamo il decoder."""
         super().train(mode)
-        if self.freeze_encoder:
+        if getattr(self, "_fully_frozen", True):
             self.encoder.eval()
         return self
 
@@ -141,8 +157,11 @@ class SatMAEppSegmenter(nn.Module):
     def forward(self, x):
         H, W = x.shape[2], x.shape[3]
         xr = F.interpolate(x, size=(self.img_size, self.img_size), mode="bilinear", align_corners=False)
-        with torch.no_grad():
-            feats = self._forward_tokens(xr)              # [B, 196, 1024]
+        if self._fully_frozen:
+            with torch.no_grad():                         # encoder congelato: nessun gradiente
+                feats = self._forward_tokens(xr)
+        else:
+            feats = self._forward_tokens(xr)              # fine-tuning parziale: gradienti attivi
         B = xr.shape[0]
         feats = feats.transpose(1, 2).reshape(B, self.embed_dim, self.grid, self.grid)  # [B,1024,14,14]
         d = self.decoder(feats)                           # [B,64,224,224]

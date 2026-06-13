@@ -20,16 +20,17 @@ def set_seed(seed):
     torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
 
 
-def build_model(mode):
+def build_model(mode, ft_blocks=0, wavelet_decoder=False):
     """Costruisce il modello in base alla modalita' di pretraining."""
     if mode in ("satmaepp", "satmaepp_rand", "satmaepp_wave"):
         from models.satmaepp_segmenter import SatMAEppSegmenter
+        wave = (mode == "satmaepp_wave") or wavelet_decoder
         model = SatMAEppSegmenter(num_classes=Config.NUM_CLASSES,
                                   ckpt_path=Config.SATMAEPP_CKPT_PATH,
                                   img_size=Config.IMAGE_SIZE, freeze_encoder=True,
                                   pretrained=(mode != "satmaepp_rand"),
-                                  wavelet_decoder=(mode == "satmaepp_wave"))
-        encoder_params = None  # encoder gia' congelato by design
+                                  wavelet_decoder=wave, ft_blocks=ft_blocks)
+        encoder_params = None  # warmup gestito dentro il modello (ft_blocks)
     elif mode == "rsp_wave":
         # Encoder RSP pre-addestrato + ramo wavelet nel decoder (migliora i bordi)
         from models.rsp_wavelet_unet import RSPWaveletUNet
@@ -103,7 +104,7 @@ def main(args):
     print(f"Train samples: {len(train_ds)} | Val samples: {len(val_ds)}")
 
     # ---------- Model / loss / optim ----------
-    model, encoder_params = build_model(mode)
+    model, encoder_params = build_model(mode, ft_blocks=args.ft_blocks, wavelet_decoder=args.wavelet_decoder)
     model = model.to(Config.DEVICE)
     # Pesi-classe (median-frequency): danno piu' importanza alle classi rare (road/water/building)
     cw = None
@@ -119,7 +120,8 @@ def main(args):
         for p in encoder_params():
             p.requires_grad = False
 
-    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=Config.LEARNING_RATE)
+    lr = args.lr if args.lr is not None else Config.LEARNING_RATE
+    optimizer = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=lr)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
     scaler = torch.amp.GradScaler('cuda', enabled=(Config.DEVICE == 'cuda'))
 
@@ -226,5 +228,10 @@ if __name__ == "__main__":
                    help="forza class-weighting ON (override Config)")
     p.add_argument("--no-class-weights", dest="class_weights", action="store_false",
                    help="forza class-weighting OFF (override Config)")
+    p.add_argument("--ft-blocks", dest="ft_blocks", type=int, default=0,
+                   help="SatMAE++: scongela gli ultimi N blocchi del ViT (0=tutto congelato, -1=tutti)")
+    p.add_argument("--wavelet-decoder", dest="wavelet_decoder", action="store_true",
+                   help="SatMAE++: attiva il ramo wavelet nel decoder (combinabile con satmaepp_rand)")
+    p.add_argument("--lr", type=float, default=None, help="override del learning rate (usa 5e-5 per il FT)")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

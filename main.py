@@ -90,9 +90,13 @@ def main(args):
     w_alpha = args.wavelet_alpha if args.wavelet_alpha is not None else Config.WAVELET_ALPHA
     w_p = args.wavelet_p if args.wavelet_p is not None else Config.WAVELET_P
     input_mode = args.input_mode or getattr(Config, "INPUT_MODE", "resize")
-    train_tf = get_train_transforms(img_size, use_wavelet=use_wave, wavelet_alpha=w_alpha, wavelet_p=w_p, input_mode=input_mode)
-    val_tf = get_val_transforms(img_size, use_wavelet=False, input_mode=input_mode)
-    print(f"Input mode: {input_mode} ({'crop nativo 224' if input_mode == 'crop' else 'resize immagine intera'})")
+    crop_resize = args.crop_resize if args.crop_resize is not None else getattr(Config, "CROP_RESIZE", 0)
+    train_tf = get_train_transforms(img_size, use_wavelet=use_wave, wavelet_alpha=w_alpha, wavelet_p=w_p,
+                                    input_mode=input_mode, crop_resize=crop_resize)
+    val_tf = get_val_transforms(img_size, use_wavelet=False, input_mode=input_mode, crop_resize=crop_resize)
+    _desc = (f"crop {img_size} da resize {crop_resize}" if (input_mode == 'crop' and crop_resize > 0)
+             else 'crop nativo' if input_mode == 'crop' else 'resize immagine intera')
+    print(f"Input mode: {input_mode} ({_desc})")
     if use_wave:
         print(f"Wavelet AUG: alpha={w_alpha} | p={w_p} (solo training, val pulito)")
     train_ds = make_loader("train", train_tf, train_subset)
@@ -237,5 +241,7 @@ if __name__ == "__main__":
     p.add_argument("--lr", type=float, default=None, help="override del learning rate (usa 5e-5 per il FT)")
     p.add_argument("--input-mode", dest="input_mode", choices=["resize", "crop"], default=None,
                    help="resize immagine intera, oppure crop nativo 224 random (default: Config.INPUT_MODE)")
+    p.add_argument("--crop-resize", dest="crop_resize", type=int, default=None,
+                   help="con --input-mode crop: resize a N prima del crop (es. 512). 0=crop nativo")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

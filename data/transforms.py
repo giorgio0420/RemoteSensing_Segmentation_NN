@@ -36,22 +36,26 @@ def _wavelet_sharpen_fn(image, alpha=0.3, **kwargs):
     return apply_wavelet_sharpen(image, 'haar', alpha)
 
 
-def _intake(image_size, input_mode, train):
-    """resize = riduce l'immagine intera; crop = patch NATIVA image_size (Random in train, Center in val)."""
+def _intake(image_size, input_mode, train, crop_resize=0):
+    """resize = immagine intera ridotta; crop = patch image_size (Random in train, Center in val).
+    Se crop_resize>0: prima resize a crop_resize, poi crop image_size (compromesso contesto/dettaglio)."""
     if input_mode == "crop":
-        return [
-            A.PadIfNeeded(min_height=image_size, min_width=image_size, border_mode=cv2.BORDER_REFLECT_101),
-            A.RandomCrop(image_size, image_size) if train else A.CenterCrop(image_size, image_size),
-        ]
+        ops = []
+        if crop_resize and crop_resize > 0:
+            ops.append(A.Resize(crop_resize, crop_resize))
+        ops.append(A.PadIfNeeded(min_height=image_size, min_width=image_size, border_mode=cv2.BORDER_REFLECT_101))
+        ops.append(A.RandomCrop(image_size, image_size) if train else A.CenterCrop(image_size, image_size))
+        return ops
     return [A.Resize(image_size, image_size)]
 
 
-def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavelet_p=0.5, input_mode="resize"):
+def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavelet_p=0.5,
+                         input_mode="resize", crop_resize=0):
     """
     (resize | crop) -> (opz.) wavelet sharpening RANDOM -> flip/rotate.
-    crop = patch nativa 224x224 random dentro l'immagine: piu' dettaglio, meno contesto.
+    crop = patch 224 random; con crop_resize>0 e' una patch da un'immagine ridotta a crop_resize.
     """
-    tfs = _intake(image_size, input_mode, train=True)
+    tfs = _intake(image_size, input_mode, train=True, crop_resize=crop_resize)
     if use_wavelet:
         tfs.append(A.Lambda(
             name="wavelet_sharpen",
@@ -61,9 +65,9 @@ def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavel
     return A.Compose(tfs)
 
 
-def get_val_transforms(image_size, use_wavelet=False, input_mode="resize"):
+def get_val_transforms(image_size, use_wavelet=False, input_mode="resize", crop_resize=0):
     """
-    Validation: nessuna augmentation. resize -> immagine intera ridotta; crop -> CenterCrop nativo.
+    Validation: nessuna augmentation. resize -> immagine intera ridotta; crop -> CenterCrop.
     NB: in crop mode la mIoU e' misurata sul ritaglio centrale, non sull'intero tile (vedi nota).
     """
-    return A.Compose(_intake(image_size, input_mode, train=False))
+    return A.Compose(_intake(image_size, input_mode, train=False, crop_resize=crop_resize))

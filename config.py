@@ -57,6 +57,7 @@ class Config:
     LEARNING_RATE = 1e-4
     NUM_EPOCHS = 20            # con backbone pretrained converge prima di 30
     IMAGE_SIZE = 224           # richiesto da Swin-T (patch embedding 224)
+    INPUT_MODE = "resize"      # "resize" (immagine intera ridotta) o "crop" (patch nativa 224 random)
     FREEZE_EPOCHS = 3          # epoche con encoder congelato (warmup). 0 = mai. Ignorato in "scratch"/"satmaepp".
 
     # ===================== WAVELET (ISPAMM) =====================

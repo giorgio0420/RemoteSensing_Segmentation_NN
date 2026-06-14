@@ -89,8 +89,10 @@ def main(args):
     # Wavelet = augmentation non distruttiva SOLO in training (val sempre pulito)
     w_alpha = args.wavelet_alpha if args.wavelet_alpha is not None else Config.WAVELET_ALPHA
     w_p = args.wavelet_p if args.wavelet_p is not None else Config.WAVELET_P
-    train_tf = get_train_transforms(img_size, use_wavelet=use_wave, wavelet_alpha=w_alpha, wavelet_p=w_p)
-    val_tf = get_val_transforms(img_size, use_wavelet=False)
+    input_mode = args.input_mode or getattr(Config, "INPUT_MODE", "resize")
+    train_tf = get_train_transforms(img_size, use_wavelet=use_wave, wavelet_alpha=w_alpha, wavelet_p=w_p, input_mode=input_mode)
+    val_tf = get_val_transforms(img_size, use_wavelet=False, input_mode=input_mode)
+    print(f"Input mode: {input_mode} ({'crop nativo 224' if input_mode == 'crop' else 'resize immagine intera'})")
     if use_wave:
         print(f"Wavelet AUG: alpha={w_alpha} | p={w_p} (solo training, val pulito)")
     train_ds = make_loader("train", train_tf, train_subset)
@@ -233,5 +235,7 @@ if __name__ == "__main__":
     p.add_argument("--wavelet-decoder", dest="wavelet_decoder", action="store_true",
                    help="SatMAE++: attiva il ramo wavelet nel decoder (combinabile con satmaepp_rand)")
     p.add_argument("--lr", type=float, default=None, help="override del learning rate (usa 5e-5 per il FT)")
+    p.add_argument("--input-mode", dest="input_mode", choices=["resize", "crop"], default=None,
+                   help="resize immagine intera, oppure crop nativo 224 random (default: Config.INPUT_MODE)")
     p.add_argument("--dry-run", action="store_true")
     main(p.parse_args())

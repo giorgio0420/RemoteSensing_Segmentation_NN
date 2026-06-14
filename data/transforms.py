@@ -36,14 +36,22 @@ def _wavelet_sharpen_fn(image, alpha=0.3, **kwargs):
     return apply_wavelet_sharpen(image, 'haar', alpha)
 
 
-def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavelet_p=0.5):
+def _intake(image_size, input_mode, train):
+    """resize = riduce l'immagine intera; crop = patch NATIVA image_size (Random in train, Center in val)."""
+    if input_mode == "crop":
+        return [
+            A.PadIfNeeded(min_height=image_size, min_width=image_size, border_mode=cv2.BORDER_REFLECT_101),
+            A.RandomCrop(image_size, image_size) if train else A.CenterCrop(image_size, image_size),
+        ]
+    return [A.Resize(image_size, image_size)]
+
+
+def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavelet_p=0.5, input_mode="resize"):
     """
-    Resize -> (opz.) wavelet sharpening RANDOM -> flip/rotate.
-    Novita': la wavelet e' ora una AUGMENTATION (p<1, non distruttiva). Il modello vede sia
-    immagini pulite sia "sharpened" -> nessuno shift di dominio permanente, effetto regolarizzante
-    (utile soprattutto nello scenario data-scarce).
+    (resize | crop) -> (opz.) wavelet sharpening RANDOM -> flip/rotate.
+    crop = patch nativa 224x224 random dentro l'immagine: piu' dettaglio, meno contesto.
     """
-    tfs = [A.Resize(image_size, image_size)]
+    tfs = _intake(image_size, input_mode, train=True)
     if use_wavelet:
         tfs.append(A.Lambda(
             name="wavelet_sharpen",
@@ -53,10 +61,9 @@ def get_train_transforms(image_size, use_wavelet=False, wavelet_alpha=0.3, wavel
     return A.Compose(tfs)
 
 
-def get_val_transforms(image_size, use_wavelet=False):
+def get_val_transforms(image_size, use_wavelet=False, input_mode="resize"):
     """
-    Validation: SEMPRE immagine pulita (nessuna augmentation).
-    Con la wavelet ora come aug di training, il modello ha gia' visto input puliti -> valutare
-    su pulito e' corretto e confrontabile col benchmark. (use_wavelet ignorato, tenuto per firma.)
+    Validation: nessuna augmentation. resize -> immagine intera ridotta; crop -> CenterCrop nativo.
+    NB: in crop mode la mIoU e' misurata sul ritaglio centrale, non sull'intero tile (vedi nota).
     """
-    return A.Compose([A.Resize(image_size, image_size)])
+    return A.Compose(_intake(image_size, input_mode, train=False))

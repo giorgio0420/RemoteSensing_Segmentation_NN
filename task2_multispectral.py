@@ -159,7 +159,7 @@ def main(a):
     opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=a.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=(dev == "cuda"))
 
-    best = -1.0; best_iou = None
+    best = -1.0; best_iou = None; best_state = None
     for ep in range(a.epochs):
         model.train(); run = 0.0
         for x, y in tl:
@@ -172,9 +172,12 @@ def main(a):
         acc, miou, iou = evaluate(model, vl, dev, nc)
         if miou > best:
             best = miou; best_iou = iou
+            best_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
         print(f"ep {ep+1}/{a.epochs} | loss {run/len(tl):.3f} | acc {acc*100:.1f}% | mIoU {miou:.4f}"
               + ("  <- best" if miou == best else ""))
     print(f"   best mIoU={best:.4f} | IoU/classe={np.round(best_iou,3).tolist()}")
+    if best_state is not None:
+        torch.save(best_state, f"best_{a.tag}.pt")     # per le figure input/output
 
     new = not os.path.exists("results_task2.csv")
     with open("results_task2.csv", "a", newline="") as f:

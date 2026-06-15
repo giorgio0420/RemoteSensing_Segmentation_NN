@@ -1,13 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-TASK 2 (secondaria) - Multi-modal / multi-spectral inputs su DFC2020 (Sentinel-1 + Sentinel-2).
+TASK 2 (secondaria) - Multi-modal / multi-spectral su DFC2020 (Sentinel-1 + Sentinel-2).
 
-Legge i .tif DIRETTAMENTE dallo zip HF (niente libreria `datasets`, niente estrazione su disco
--> nessun problema di estrazioni parziali). Rimappa le etichette a 8 classi (+255 ignore).
+Legge i .tif direttamente dallo zip HF (niente libreria `datasets`). Etichette rimappate a 8 classi
+(+255 ignore); con --binary -> acqua(1) vs terra(0).
 
-  (Q1) bande extra aiutano? -> RGB(3) vs S2 multispettrale(10) vs +radar(12)
-  (Q2) il pretraining aiuta? -> encoder ImageNet vs scratch (stessa rete)
-Modello: U-Net (ResNet-34) via segmentation-models-pytorch, in_channels variabile.
+Modelli:
+  --model resnet  : U-Net ResNet-34 (smp), in_channels variabile, pretraining ImageNet vs scratch
+  --model satmae  : SatMAE++ fMoW-Sentinel (ViT-L group-channel, congelato) + decoder  [richiede --ckpt]
+
+Confronti chiave (consegna):
+  con/senza pesi SatMAE++   ->  --model satmae  con/ senza --ckpt
+  con/senza radar           ->  --bands msi  vs  msi_sar
+  data-scarce / pretraining ->  --scratch (solo resnet)
 """
 import argparse, csv, io, os, random, zipfile
 import numpy as np
@@ -21,13 +26,9 @@ S2_STD  = np.array([633.15,650.28,712.13,965.23,948.98,1108.07,1258.36,1233.15,1
 S1_MEAN = np.array([-12.55,-20.19], dtype=np.float32)
 S1_STD  = np.array([5.26,5.91], dtype=np.float32)
 
-# 13 bande S2: 0 B1,1 B2,2 B3,3 B4,4 B5,5 B6,6 B7,7 B8,8 B8A,9 B9,10 B10,11 B11,12 B12
-RGB_IDX = [3, 2, 1]                              # R,G,B = B4,B3,B2
-MSI_IDX = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]       # 10 bande (scarta B1,B9,B10) = set SatMAE-Sentinel
-
-# rimappatura etichette grezze (0..17) -> 8 classi; 255 = ignore (dal loading script ufficiale)
+RGB_IDX = [3, 2, 1]
+MSI_IDX = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]       # 10 bande = set SatMAE-Sentinel [B2,B3,B4,B5,B6,B7,B8,B8A,B11,B12]
 DFC_MAP = np.array([255, 0,0,0,0,0, 1,1, 255,255, 2, 3, 4, 5, 4, 255, 6, 7], dtype=np.int64)
-N_CLASSES = 8
 IGNORE = 255
 SEED = 42
 
@@ -37,24 +38,20 @@ def set_seed(s=SEED):
 
 
 def prepare_data():
-    """Scarica DFC2020.zip (cache HF) e legge metadata DIRETTAMENTE dallo zip. Niente estrazione."""
     from huggingface_hub import hf_hub_download
     zp = hf_hub_download("GFM-Bench/DFC2020", "data/DFC2020.zip", repo_type="dataset")
     with zipfile.ZipFile(zp) as z:
         meta = [n for n in z.namelist() if n.endswith("metadata.csv")][0]
-        prefix = meta[: -len("metadata.csv")]        # es. "DFC2020/"
+        prefix = meta[: -len("metadata.csv")]
         df = pd.read_csv(io.BytesIO(z.read(meta)))
-    print(f"zip={os.path.basename(zp)} | prefix='{prefix}' | righe metadata={len(df)}")
     return zp, prefix, df
 
 
 class DFC2020(Dataset):
-    def __init__(self, zip_path, prefix, df_split, mode="msi", subset=None, seed=SEED):
-        self.zip_path = zip_path
-        self.prefix = prefix
-        self._z = None                              # ZipFile aperto pigramente per-worker (post-fork)
+    def __init__(self, zip_path, prefix, df_split, mode="msi", subset=None, seed=SEED, binary=False):
+        self.zip_path = zip_path; self.prefix = prefix; self._z = None
         self.df = df_split.reset_index(drop=True)
-        self.mode = mode
+        self.mode = mode; self.binary = binary
         self.bands = RGB_IDX if mode == "rgb" else MSI_IDX
         idx = list(range(len(self.df)))
         if subset and subset < len(idx):
@@ -68,22 +65,24 @@ class DFC2020(Dataset):
         im = tifffile.imread(io.BytesIO(self._z.read(self.prefix + rel)))
         if im.ndim == 2:
             im = im[..., None]
-        return np.transpose(im, (2, 0, 1))          # H,W,C -> C,H,W
+        return np.transpose(im, (2, 0, 1))
 
     def __len__(self):
         return len(self.idx)
 
     def __getitem__(self, i):
         row = self.df.iloc[self.idx[i]]
-        opt = self._read(row.optical_path).astype(np.float32)           # [13,96,96]
+        opt = self._read(row.optical_path).astype(np.float32)
         opt = (opt - S2_MEAN[:, None, None]) / S2_STD[:, None, None]
         x = opt[self.bands]
         if self.mode == "msi_sar":
-            rad = self._read(row.radar_path).astype(np.float32)         # [2,96,96]
+            rad = self._read(row.radar_path).astype(np.float32)
             rad = (rad - S1_MEAN[:, None, None]) / S1_STD[:, None, None]
             x = np.concatenate([x, rad], axis=0)
-        lab = self._read(row.label_path)[0].astype(np.int64)            # [96,96] valori 0..17
-        lab = DFC_MAP[lab]                                              # -> 0..7 / 255
+        lab = self._read(row.label_path)[0].astype(np.int64)
+        lab = DFC_MAP[lab]
+        if self.binary:
+            lab = np.where(lab == IGNORE, IGNORE, (lab == 7).astype(np.int64))   # 1=acqua, 0=terra
         return torch.from_numpy(np.ascontiguousarray(x)).float(), torch.from_numpy(lab).long()
 
 
@@ -91,17 +90,21 @@ def in_channels_for(mode):
     return {"rgb": 3, "msi": 10, "msi_sar": 12}[mode]
 
 
-def build_model(in_ch, pretrained):
+def build_model(a, n_classes):
+    if a.model == "satmae":
+        from satmae_sentinel import SatMAESentinelSeg
+        return SatMAESentinelSeg(num_classes=n_classes, ckpt_path=a.ckpt,
+                                 ft_blocks=a.ft_blocks, use_sar=(a.bands == "msi_sar"))
     import segmentation_models_pytorch as smp
     return smp.Unet(encoder_name="resnet34",
-                    encoder_weights="imagenet" if pretrained else None,
-                    in_channels=in_ch, classes=N_CLASSES)
+                    encoder_weights="imagenet" if not a.scratch else None,
+                    in_channels=in_channels_for(a.bands), classes=n_classes)
 
 
 @torch.no_grad()
-def evaluate(model, loader, device):
+def evaluate(model, loader, device, n_classes):
     model.eval()
-    inter = torch.zeros(N_CLASSES, device=device); union = torch.zeros(N_CLASSES, device=device)
+    inter = torch.zeros(n_classes, device=device); union = torch.zeros(n_classes, device=device)
     correct = total = 0
     for x, y in loader:
         x, y = x.to(device), y.to(device)
@@ -109,7 +112,7 @@ def evaluate(model, loader, device):
             pred = model(x).argmax(1)
         valid = y != IGNORE
         correct += ((pred == y) & valid).sum().item(); total += valid.sum().item()
-        for c in range(N_CLASSES):
+        for c in range(n_classes):
             pc = (pred == c) & valid; yc = (y == c) & valid
             inter[c] += (pc & yc).sum(); union[c] += (pc | yc).sum()
     iou = inter / (union + 1e-6); v = union > 0
@@ -119,20 +122,23 @@ def evaluate(model, loader, device):
 def main(a):
     set_seed()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
+    nc = 2 if a.binary else 8
+    if a.model == "satmae" and a.bands == "rgb":
+        a.bands = "msi"          # SatMAE-Sentinel vuole le 10 bande
     zp, prefix, df = prepare_data()
-    tr = DFC2020(zp, prefix, df[df.split == "train"], a.bands, subset=a.subset)
-    va = DFC2020(zp, prefix, df[df.split == "val"], a.bands, subset=a.val_subset)
-    print(f"mode={a.bands} | pretrained={not a.scratch} | in_ch={in_channels_for(a.bands)} | "
+    tr = DFC2020(zp, prefix, df[df.split == "train"], a.bands, subset=a.subset, binary=a.binary)
+    va = DFC2020(zp, prefix, df[df.split == "val"], a.bands, subset=a.val_subset, binary=a.binary)
+    print(f"model={a.model} | bands={a.bands} | binary={a.binary} | classes={nc} | "
           f"train {len(tr)} | val {len(va)} | dev={dev}")
     tl = DataLoader(tr, batch_size=a.batch_size, shuffle=True, num_workers=2, pin_memory=True)
     vl = DataLoader(va, batch_size=a.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 
     import segmentation_models_pytorch as smp
-    model = build_model(in_channels_for(a.bands), pretrained=not a.scratch).to(dev)
+    model = build_model(a, nc).to(dev)
     ce = nn.CrossEntropyLoss(ignore_index=IGNORE)
     dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=IGNORE)
     crit = lambda p, t: ce(p, t) + dice(p, t)
-    opt = torch.optim.Adam(model.parameters(), lr=a.lr)
+    opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=a.lr)
     scaler = torch.amp.GradScaler("cuda", enabled=(dev == "cuda"))
 
     best = -1.0; best_iou = None
@@ -145,7 +151,7 @@ def main(a):
                 loss = crit(model(x), y)
             scaler.scale(loss).backward(); scaler.step(opt); scaler.update()
             run += loss.item()
-        acc, miou, iou = evaluate(model, vl, dev)
+        acc, miou, iou = evaluate(model, vl, dev, nc)
         if miou > best:
             best = miou; best_iou = iou
         print(f"ep {ep+1}/{a.epochs} | loss {run/len(tl):.3f} | acc {acc*100:.1f}% | mIoU {miou:.4f}"
@@ -156,15 +162,19 @@ def main(a):
     with open("results_task2.csv", "a", newline="") as f:
         w = csv.writer(f)
         if new:
-            w.writerow(["tag", "bands", "in_ch", "pretrained", "epochs", "best_mIoU"])
-        w.writerow([a.tag, a.bands, in_channels_for(a.bands), not a.scratch, a.epochs, f"{best:.4f}"])
+            w.writerow(["tag", "model", "bands", "binary", "epochs", "best_mIoU"])
+        w.writerow([a.tag, a.model, a.bands, a.binary, a.epochs, f"{best:.4f}"])
     print(f"OK '{a.tag}' -> results_task2.csv")
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
+    p.add_argument("--model", choices=["resnet", "satmae"], default="resnet")
+    p.add_argument("--ckpt", default="", help="checkpoint SatMAE-Sentinel (per --model satmae)")
+    p.add_argument("--ft-blocks", dest="ft_blocks", type=int, default=0, help="satmae: scongela ultimi N blocchi ViT")
     p.add_argument("--bands", choices=["rgb", "msi", "msi_sar"], default="msi")
-    p.add_argument("--scratch", action="store_true", help="encoder random (default: ImageNet)")
+    p.add_argument("--binary", action="store_true", help="acqua vs terra (2 classi)")
+    p.add_argument("--scratch", action="store_true", help="resnet: encoder random invece di ImageNet")
     p.add_argument("--subset", type=int, default=2000)
     p.add_argument("--val-subset", dest="val_subset", type=int, default=800)
     p.add_argument("--epochs", type=int, default=15)

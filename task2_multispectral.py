@@ -105,7 +105,7 @@ def main(a):
     dev = "cuda" if torch.cuda.is_available() else "cpu"
     from datasets import load_dataset
     print(f"Carico GFM-Bench/DFC2020 ... (mode={a.bands}, pretrained={not a.scratch})")
-    ds = load_dataset("GFM-Bench/DFC2020")
+    ds = load_dataset("GFM-Bench/DFC2020", trust_remote_code=True)
     tr = DFC2020(ds["train"], a.bands, subset=a.subset)
     va = DFC2020(ds["validation"], a.bands, subset=a.val_subset)
     print(f"Train {len(tr)} | Val {len(va)} | in_channels={in_channels_for(a.bands)}")

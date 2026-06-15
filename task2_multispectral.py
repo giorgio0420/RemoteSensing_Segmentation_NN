@@ -125,7 +125,7 @@ def evaluate(model, loader, device, n_classes):
     return correct / max(total, 1), (iou[v].mean().item() if v.any() else 0.0), iou.cpu().numpy()
 
 
-def compute_class_weights(ds, n_classes, sample=400):
+def compute_class_weights(ds, n_classes, sample=1500):
     """Median-frequency balancing da un campione di label (per le classi rare)."""
     counts = np.zeros(n_classes, dtype=np.float64)
     for j in ds.idx[:sample]:
@@ -137,8 +137,10 @@ def compute_class_weights(ds, n_classes, sample=400):
             counts[c] += (lab == c).sum()
     freq = counts / max(counts.sum(), 1.0)
     med = np.median(freq[freq > 0]) if (freq > 0).any() else 1.0
-    w = np.clip(np.where(freq > 0, med / np.maximum(freq, 1e-6), 1.0), 0.0, 10.0)  # cap per stabilita'
-    print(f"class-weights: {np.round(w, 2).tolist()}")
+    w = np.clip(np.where(freq > 0, med / np.maximum(freq, 1e-6), 1.0), 0.0, 15.0)  # cap per stabilita'
+    present = (counts > 0).sum()
+    print(f"class-weights: {np.round(w, 2).tolist()} | classi presenti nel campione: {present}/{n_classes}")
+    print(f"   pixel/classe: {counts.astype(int).tolist()}")   # per vedere chi e' rara (es. Barren)
     return torch.tensor(w, dtype=torch.float32)
 
 

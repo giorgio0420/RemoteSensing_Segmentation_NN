@@ -2,22 +2,20 @@
 """
 TASK 2 (secondaria) - Multi-modal / multi-spectral inputs su DFC2020 (Sentinel-1 + Sentinel-2).
 
-Loader DIRETTO dallo zip HF (niente libreria `datasets`, niente guerra di versioni):
-scarica data/DFC2020.zip, legge i .tif con tifffile, rimappa le etichette a 8 classi (+255 ignore).
+Legge i .tif DIRETTAMENTE dallo zip HF (niente libreria `datasets`, niente estrazione su disco
+-> nessun problema di estrazioni parziali). Rimappa le etichette a 8 classi (+255 ignore).
 
-Risponde a 2 domande della consegna:
   (Q1) bande extra aiutano? -> RGB(3) vs S2 multispettrale(10) vs +radar(12)
   (Q2) il pretraining aiuta? -> encoder ImageNet vs scratch (stessa rete)
 Modello: U-Net (ResNet-34) via segmentation-models-pytorch, in_channels variabile.
 """
-import argparse, csv, os, random, zipfile
+import argparse, csv, io, os, random, zipfile
 import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-# --- statistiche per-banda (dal loading script ufficiale GFM-Bench/DFC2020) ---
 S2_MEAN = np.array([1370.19,1184.38,1120.77,1136.26,1263.74,1645.40,1846.87,1762.60,1972.62,582.73,14.77,1732.16,1247.92], dtype=np.float32)
 S2_STD  = np.array([633.15,650.28,712.13,965.23,948.98,1108.07,1258.36,1233.15,1364.39,472.38,14.31,1310.37,1087.60], dtype=np.float32)
 S1_MEAN = np.array([-12.55,-20.19], dtype=np.float32)
@@ -27,7 +25,7 @@ S1_STD  = np.array([5.26,5.91], dtype=np.float32)
 RGB_IDX = [3, 2, 1]                              # R,G,B = B4,B3,B2
 MSI_IDX = [1, 2, 3, 4, 5, 6, 7, 8, 11, 12]       # 10 bande (scarta B1,B9,B10) = set SatMAE-Sentinel
 
-# rimappatura etichette grezze (0..17) -> 8 classi; 255 = ignore (dal loading script)
+# rimappatura etichette grezze (0..17) -> 8 classi; 255 = ignore (dal loading script ufficiale)
 DFC_MAP = np.array([255, 0,0,0,0,0, 1,1, 255,255, 2, 3, 4, 5, 4, 255, 6, 7], dtype=np.int64)
 N_CLASSES = 8
 IGNORE = 255
@@ -38,31 +36,23 @@ def set_seed(s=SEED):
     random.seed(s); np.random.seed(s); torch.manual_seed(s); torch.cuda.manual_seed_all(s)
 
 
-def read_tif(path):
-    import tifffile
-    im = tifffile.imread(path)
-    if im.ndim == 2:
-        im = im[..., None]
-    return np.transpose(im, (2, 0, 1))           # H,W,C -> C,H,W
-
-
 def prepare_data():
-    """Scarica DFC2020.zip da HF, estrae una volta, ritorna (dir, metadata_df)."""
+    """Scarica DFC2020.zip (cache HF) e legge metadata DIRETTAMENTE dallo zip. Niente estrazione."""
     from huggingface_hub import hf_hub_download
     zp = hf_hub_download("GFM-Bench/DFC2020", "data/DFC2020.zip", repo_type="dataset")
-    root = os.path.join(os.path.dirname(zp), "DFC2020_extracted")
-    ddir = os.path.join(root, "DFC2020")
-    if not os.path.exists(os.path.join(ddir, "metadata.csv")):
-        print("Estraggo DFC2020.zip ...")
-        with zipfile.ZipFile(zp) as z:
-            z.extractall(root)
-    df = pd.read_csv(os.path.join(ddir, "metadata.csv"))
-    return ddir, df
+    with zipfile.ZipFile(zp) as z:
+        meta = [n for n in z.namelist() if n.endswith("metadata.csv")][0]
+        prefix = meta[: -len("metadata.csv")]        # es. "DFC2020/"
+        df = pd.read_csv(io.BytesIO(z.read(meta)))
+    print(f"zip={os.path.basename(zp)} | prefix='{prefix}' | righe metadata={len(df)}")
+    return zp, prefix, df
 
 
 class DFC2020(Dataset):
-    def __init__(self, data_dir, df_split, mode="msi", subset=None, seed=SEED):
-        self.dir = data_dir
+    def __init__(self, zip_path, prefix, df_split, mode="msi", subset=None, seed=SEED):
+        self.zip_path = zip_path
+        self.prefix = prefix
+        self._z = None                              # ZipFile aperto pigramente per-worker (post-fork)
         self.df = df_split.reset_index(drop=True)
         self.mode = mode
         self.bands = RGB_IDX if mode == "rgb" else MSI_IDX
@@ -71,20 +61,29 @@ class DFC2020(Dataset):
             random.Random(seed).shuffle(idx); idx = idx[:subset]
         self.idx = idx
 
+    def _read(self, rel):
+        import tifffile
+        if self._z is None:
+            self._z = zipfile.ZipFile(self.zip_path)
+        im = tifffile.imread(io.BytesIO(self._z.read(self.prefix + rel)))
+        if im.ndim == 2:
+            im = im[..., None]
+        return np.transpose(im, (2, 0, 1))          # H,W,C -> C,H,W
+
     def __len__(self):
         return len(self.idx)
 
     def __getitem__(self, i):
         row = self.df.iloc[self.idx[i]]
-        opt = read_tif(os.path.join(self.dir, row.optical_path)).astype(np.float32)   # [13,96,96]
+        opt = self._read(row.optical_path).astype(np.float32)           # [13,96,96]
         opt = (opt - S2_MEAN[:, None, None]) / S2_STD[:, None, None]
         x = opt[self.bands]
         if self.mode == "msi_sar":
-            rad = read_tif(os.path.join(self.dir, row.radar_path)).astype(np.float32) # [2,96,96]
+            rad = self._read(row.radar_path).astype(np.float32)         # [2,96,96]
             rad = (rad - S1_MEAN[:, None, None]) / S1_STD[:, None, None]
             x = np.concatenate([x, rad], axis=0)
-        lab = read_tif(os.path.join(self.dir, row.label_path))[0].astype(np.int64)    # [96,96], valori 0..17
-        lab = DFC_MAP[lab]                                                            # -> 0..7 / 255
+        lab = self._read(row.label_path)[0].astype(np.int64)            # [96,96] valori 0..17
+        lab = DFC_MAP[lab]                                              # -> 0..7 / 255
         return torch.from_numpy(np.ascontiguousarray(x)).float(), torch.from_numpy(lab).long()
 
 
@@ -120,11 +119,11 @@ def evaluate(model, loader, device):
 def main(a):
     set_seed()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
-    ddir, df = prepare_data()
-    tr = DFC2020(ddir, df[df.split == "train"], a.bands, subset=a.subset)
-    va = DFC2020(ddir, df[df.split == "val"], a.bands, subset=a.val_subset)
+    zp, prefix, df = prepare_data()
+    tr = DFC2020(zp, prefix, df[df.split == "train"], a.bands, subset=a.subset)
+    va = DFC2020(zp, prefix, df[df.split == "val"], a.bands, subset=a.val_subset)
     print(f"mode={a.bands} | pretrained={not a.scratch} | in_ch={in_channels_for(a.bands)} | "
-          f"train {len(tr)} | val {len(va)}")
+          f"train {len(tr)} | val {len(va)} | dev={dev}")
     tl = DataLoader(tr, batch_size=a.batch_size, shuffle=True, num_workers=2, pin_memory=True)
     vl = DataLoader(va, batch_size=a.batch_size, shuffle=False, num_workers=2, pin_memory=True)
 

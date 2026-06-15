@@ -119,6 +119,23 @@ def evaluate(model, loader, device, n_classes):
     return correct / max(total, 1), (iou[v].mean().item() if v.any() else 0.0), iou.cpu().numpy()
 
 
+def compute_class_weights(ds, n_classes, sample=400):
+    """Median-frequency balancing da un campione di label (per le classi rare)."""
+    counts = np.zeros(n_classes, dtype=np.float64)
+    for j in ds.idx[:sample]:
+        row = ds.df.iloc[j]
+        lab = DFC_MAP[ds._read(row.label_path)[0].astype(np.int64)]
+        if ds.binary:
+            lab = np.where(lab == IGNORE, IGNORE, (lab == 7).astype(np.int64))
+        for c in range(n_classes):
+            counts[c] += (lab == c).sum()
+    freq = counts / max(counts.sum(), 1.0)
+    med = np.median(freq[freq > 0]) if (freq > 0).any() else 1.0
+    w = np.where(freq > 0, med / np.maximum(freq, 1e-6), 1.0)
+    print(f"class-weights: {np.round(w, 2).tolist()}")
+    return torch.tensor(w, dtype=torch.float32)
+
+
 def main(a):
     set_seed()
     dev = "cuda" if torch.cuda.is_available() else "cpu"
@@ -135,7 +152,8 @@ def main(a):
 
     import segmentation_models_pytorch as smp
     model = build_model(a, nc).to(dev)
-    ce = nn.CrossEntropyLoss(ignore_index=IGNORE)
+    cw = compute_class_weights(tr, nc).to(dev) if a.class_weights else None
+    ce = nn.CrossEntropyLoss(ignore_index=IGNORE, weight=cw)
     dice = smp.losses.DiceLoss(mode="multiclass", ignore_index=IGNORE)
     crit = lambda p, t: ce(p, t) + dice(p, t)
     opt = torch.optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=a.lr)
@@ -174,6 +192,7 @@ if __name__ == "__main__":
     p.add_argument("--ft-blocks", dest="ft_blocks", type=int, default=0, help="satmae: scongela ultimi N blocchi ViT")
     p.add_argument("--bands", choices=["rgb", "msi", "msi_sar"], default="msi")
     p.add_argument("--binary", action="store_true", help="acqua vs terra (2 classi)")
+    p.add_argument("--class-weights", dest="class_weights", action="store_true", help="median-frequency sulle classi rare")
     p.add_argument("--scratch", action="store_true", help="resnet: encoder random invece di ImageNet")
     p.add_argument("--subset", type=int, default=2000)
     p.add_argument("--val-subset", dest="val_subset", type=int, default=800)

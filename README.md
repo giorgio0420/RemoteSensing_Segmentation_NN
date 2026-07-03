@@ -3,7 +3,7 @@
 ![Dataset preview](gif.gif)
 
 Neural Networks project — **does pretraining on satellite imagery improve land-cover
-segmentation when labels are scarce?** Two complementary studies on remote-sensing data.
+segmentation in a data scarce scenario?** Two complementary studies on remote-sensing data.
 
 | | Study 1 — Pretraining (main) | Study 2 — Sensor fusion (secondary) |
 |---|---|---|
